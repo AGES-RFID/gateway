@@ -6,9 +6,7 @@ on:
       - '**'
 
 jobs:
-  call-sync-workflow:
+  call-sync:
     uses: AGES-RFID/cicd/.github/workflows/sync-to-gitlab.yml@main
-    with:
-      gitlab_repo_url: "https://tools.ages.pucrs.br/sistema-de-controle-inteligente-de-estacionamento-com-rfid/gateway.git"
     secrets:
       gitlab_token: ${{ secrets.GITLAB_TOKEN }}
