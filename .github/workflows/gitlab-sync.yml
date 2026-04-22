@@ -1,0 +1,11 @@
+name: Sync to GitLab
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  gitlab-sync:
+    uses: AGES-RFID/cicd/.github/workflows/gitlab-sync.yml@main
+    secrets:
+      gitlab_token: ${{ secrets.GITLAB_TOKEN }}

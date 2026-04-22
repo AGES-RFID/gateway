@@ -1,0 +1,19 @@
+name: PR to Trunk
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: CI
+    uses: AGES-RFID/cicd/.github/workflows/ci-dotnet.yml@main
+    with:
+      dotnet-version: "10.0.x"
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,11 @@
+name: Add to board
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  add-to-board:
+    uses: AGES-RFID/cicd/.github/workflows/add-to-board.yml@main
+    secrets:
+      ADD_TO_PROJECT_PAT: ${{ secrets.ADD_TO_PROJECT_PAT }}
