@@ -52,13 +52,13 @@ public sealed class RfidReaderWorker : BackgroundService
             settings.Antennas.EnableById(antennaIds);
         }
 
-        settings.ReaderMode = ParseReaderMode(
-            _configuration["Reader:ReaderMode"],
-            ReaderMode.AutoSetDenseReader);
+        // settings.ReaderMode = ParseReaderMode(
+        //     _configuration["Reader:ReaderMode"],
+        //     ReaderMode.AutoSetDenseReader);
 
-        settings.SearchMode = ParseSearchMode(
-            _configuration["Reader:SearchMode"],
-            SearchMode.DualTarget);
+        // settings.SearchMode = ParseSearchMode(
+        //     _configuration["Reader:SearchMode"],
+        //     SearchMode.DualTarget);
 
         settings.Session = _configuration.GetValue<ushort?>("Reader:Session") ?? 2;
         settings.TagPopulationEstimate = _configuration.GetValue<ushort?>("Reader:TagPopulationEstimate") ?? 32;
