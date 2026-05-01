@@ -3,6 +3,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RfidGateway.Models;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace RfidGateway.Services;
 
@@ -11,6 +15,7 @@ public sealed class RfidReaderWorker : BackgroundService
     private readonly IConfiguration _configuration;
     private readonly ILogger<RfidReaderWorker> _logger;
     private ImpinjReader? _reader;
+    private readonly HttpClient _httpClient = new HttpClient();
 
     public RfidReaderWorker(IConfiguration configuration, ILogger<RfidReaderWorker> logger)
     {
@@ -35,6 +40,7 @@ public sealed class RfidReaderWorker : BackgroundService
 
         settings.Report.Mode = ReportMode.Individual;
         settings.Report.IncludeAntennaPortNumber = true;
+        settings.Report.IncludeFastId = _configuration.GetValue("Reader:IncludeFastId", true);
         settings.Report.IncludePeakRssi = _configuration.GetValue("Reader:IncludePeakRssi", true);
         settings.Report.IncludeFirstSeenTime = _configuration.GetValue("Reader:IncludeFirstSeenTime", true);
         settings.Report.IncludeLastSeenTime = _configuration.GetValue("Reader:IncludeLastSeenTime", true);
@@ -112,6 +118,15 @@ public sealed class RfidReaderWorker : BackgroundService
                 Tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null
             };
 
+            var tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null;
+            var accessEvent = new ParkingAccessEvent
+            {
+                Tid = message.Tid,
+                Epc = message.Epc,
+                Entrance = message.AntennaPort == 1,
+                Timestamp = message.LastSeenUtc ?? DateTime.UtcNow
+            };
+
             _logger.LogInformation(
                 "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
                 message.Epc,
@@ -123,12 +138,46 @@ public sealed class RfidReaderWorker : BackgroundService
                 message.Tid
             );
 
-            PublishToGateway(message);
+            PublishToGateway(accessEvent);
         }
     }
 
-    private void PublishToGateway(TagReadMessage message)
+    private void PublishToGateway(ParkingAccessEvent accessEvent)
     {
+        var domain = _configuration["Gateway:Domain"];
+        var endpoint = _configuration["Gateway:Endpoint"];
+        
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
+        {
+            _logger.LogDebug("Gateway:Domain or Gateway:Endpoint not configured; skipping publish.");
+            return;
+        }
+
+        var url = $"{domain}/{endpoint}";
+        _ = PublishToGatewayAsync(url, accessEvent);
+    }
+
+    private async Task PublishToGatewayAsync(string url, ParkingAccessEvent accessEvent)
+    {
+        try
+        {
+            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var json = JsonSerializer.Serialize(accessEvent, opts);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Publishing tag to {Url} returned {Status}", url, resp.StatusCode);
+            }
+            else
+            {
+                _logger.LogDebug("Published tag to {Url}", url);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish tag to {Url}", url);
+        }
     }
 
     private void OnKeepaliveReceived(ImpinjReader sender)
