@@ -145,24 +145,32 @@ public sealed class RfidReaderWorker : BackgroundService
     private void PublishToGateway(ParkingAccessEvent accessEvent)
     {
         var domain = _configuration["Gateway:Domain"];
-        var endpoint = _configuration["Gateway:Endpoint"];
+        var entryEndpoint = _configuration["Gateway:EntryEndpoint"];
+        var exitEndpoint = _configuration["Gateway:ExitEndpoint"];
         
+        var endpoint = accessEvent.Entrance ? entryEndpoint : exitEndpoint;
+
         if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
         {
-            _logger.LogDebug("Gateway:Domain or Gateway:Endpoint not configured; skipping publish.");
+            _logger.LogDebug("Gateway:Domain or selected endpoint not configured; skipping publish.");
             return;
         }
 
         var url = $"{domain}/{endpoint}";
-        _ = PublishToGatewayAsync(url, accessEvent);
+        var request = new AccessRequest
+        {
+            TagId = accessEvent.Epc
+        };
+
+        _ = PublishToGatewayAsync(url, request);
     }
 
-    private async Task PublishToGatewayAsync(string url, ParkingAccessEvent accessEvent)
+    private async Task PublishToGatewayAsync(string url, AccessRequest request)
     {
         try
         {
             var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            var json = JsonSerializer.Serialize(accessEvent, opts);
+            var json = JsonSerializer.Serialize(request, opts);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
