@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Gateway.API/Gateway.API.csproj" />
+  <Project Path="Gateway.Tests.Integration/Gateway.Tests.Integration.csproj" />
+  <Project Path="Gateway.Tests.Unit/Gateway.Tests.Unit.csproj" />
+</Solution>

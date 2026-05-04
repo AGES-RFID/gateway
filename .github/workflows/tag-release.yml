@@ -1,0 +1,20 @@
+name: Tag Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+jobs:
+  generate-release:
+    name: Release
+    uses: AGES-RFID/cicd/.github/workflows/tag-release.yml@main
+
+  deploy-production:
+    name: CD Production
+    needs: [generate-release]
+    uses: AGES-RFID/cicd/.github/workflows/deployment.yml@main
+    with:
+      environment: 'production'
+      version: ${{ github.ref_name }}
