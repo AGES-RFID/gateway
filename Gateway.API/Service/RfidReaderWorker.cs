@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RfidGateway.Models;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -16,6 +17,8 @@ public sealed class RfidReaderWorker : BackgroundService
     private readonly ILogger<RfidReaderWorker> _logger;
     private ImpinjReader? _reader;
     private readonly HttpClient _httpClient = new HttpClient();
+    private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
+    private TimeSpan _tagCooldown;
 
     public RfidReaderWorker(IConfiguration configuration, ILogger<RfidReaderWorker> logger)
     {
@@ -72,7 +75,10 @@ public sealed class RfidReaderWorker : BackgroundService
         _reader.ApplySettings(settings);
         _reader.Start();
 
-        _logger.LogInformation("Reader started.");
+        var cooldownSeconds = _configuration.GetValue("Reader:TagCooldownSeconds", 30);
+        _tagCooldown = TimeSpan.FromSeconds(cooldownSeconds);
+
+        _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
         return base.StartAsync(cancellationToken);
     }
 
@@ -118,13 +124,19 @@ public sealed class RfidReaderWorker : BackgroundService
                 Tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null
             };
 
+            var now = DateTime.UtcNow;
+            if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
+            {
+                continue;
+            }
+            _lastPublishedAt[message.Epc] = now;
+
             var tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null;
             var accessEvent = new ParkingAccessEvent
             {
                 Tid = message.Tid,
                 Epc = message.Epc,
                 Entrance = message.AntennaPort == 1,
-                Timestamp = message.LastSeenUtc ?? DateTime.UtcNow
             };
 
             _logger.LogInformation(
