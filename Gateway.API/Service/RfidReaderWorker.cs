@@ -69,7 +69,11 @@ public sealed class RfidReaderWorker : BackgroundService
         _tagCooldown = TimeSpan.FromSeconds(cooldownSeconds);
 
         _status.SetConnected(true);
-        _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
+
+        _logger.LogInformation(
+            "Reader started. Tag cooldown: {Cooldown}s. Configuration mode: {ConfigurationMode}",
+            cooldownSeconds,
+            IsConfigurationMode());
 
         return base.StartAsync(cancellationToken);
     }
@@ -87,6 +91,7 @@ public sealed class RfidReaderWorker : BackgroundService
             _logger.LogInformation("Stopping reader.");
             _readerService.Stop();
             _readerService.Disconnect();
+            _status.SetConnected(false);
         }
         catch (Exception ex)
         {
@@ -100,22 +105,21 @@ public sealed class RfidReaderWorker : BackgroundService
     {
         foreach (Tag tag in report)
         {
-            var message = new TagReadMessage
-            {
-                Epc = tag.Epc?.ToHexString() ?? string.Empty,
-                AntennaPort = tag.AntennaPortNumber,
-                PeakRssiInDbm = tag.IsPeakRssiInDbmPresent ? tag.PeakRssiInDbm : null,
-                FirstSeenUtc = tag.IsFirstSeenTimePresent ? tag.FirstSeenTime.LocalDateTime : null,
-                LastSeenUtc = tag.IsLastSeenTimePresent ? tag.LastSeenTime.LocalDateTime : null,
-                SeenCount = tag.IsSeenCountPresent ? tag.TagSeenCount : null,
-                Tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null
-            };
+            var message = MapTagReadMessage(tag);
 
-            var now = DateTime.UtcNow;
-            if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
+            if (string.IsNullOrWhiteSpace(message.Epc))
                 continue;
 
-            _lastPublishedAt[message.Epc] = now;
+            if (IsConfigurationMode())
+            {
+                PublishConfigurationTag(message);
+                continue;
+            }
+
+            if (IsInCooldown(message.Epc))
+                continue;
+
+            LogTag(message);
 
             var accessEvent = new ParkingAccessEvent
             {
@@ -124,51 +128,123 @@ public sealed class RfidReaderWorker : BackgroundService
                 Entrance = message.AntennaPort == 1,
             };
 
-            _logger.LogInformation(
-                "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
-                message.Epc,
-                message.AntennaPort,
-                message.PeakRssiInDbm,
-                message.FirstSeenUtc,
-                message.LastSeenUtc,
-                message.SeenCount,
-                message.Tid);
-
-            PublishToGateway(accessEvent);
+            PublishAccessEvent(accessEvent);
         }
     }
 
-    private void PublishToGateway(ParkingAccessEvent accessEvent)
+    private TagReadMessage MapTagReadMessage(Tag tag)
+    {
+        return new TagReadMessage
+        {
+            Epc = tag.Epc?.ToHexString() ?? string.Empty,
+            AntennaPort = tag.AntennaPortNumber,
+            PeakRssiInDbm = tag.IsPeakRssiInDbmPresent ? tag.PeakRssiInDbm : null,
+            FirstSeenUtc = tag.IsFirstSeenTimePresent ? tag.FirstSeenTime.LocalDateTime : null,
+            LastSeenUtc = tag.IsLastSeenTimePresent ? tag.LastSeenTime.LocalDateTime : null,
+            SeenCount = tag.IsSeenCountPresent ? tag.TagSeenCount : null,
+            Tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null
+        };
+    }
+
+    private bool IsConfigurationMode()
+    {
+        return _configuration.GetValue("Gateway:ConfigurationMode", false);
+    }
+
+    private bool IsInCooldown(string epc)
+    {
+        var now = DateTime.UtcNow;
+
+        if (_lastPublishedAt.TryGetValue(epc, out var lastSeen) &&
+            now - lastSeen < _tagCooldown)
+        {
+            return true;
+        }
+
+        _lastPublishedAt[epc] = now;
+        return false;
+    }
+
+    private void PublishConfigurationTag(TagReadMessage message)
     {
         var domain = _configuration["Gateway:Domain"];
-        var endpoint = _configuration["Gateway:Endpoint"];
+        var endpoint = _configuration["Gateway:ConfigurationEndpoint"];
 
         if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
         {
-            _logger.LogDebug("Gateway:Domain or Gateway:Endpoint not configured; skipping publish.");
+            _logger.LogDebug("Gateway:Domain or Gateway:ConfigurationEndpoint not configured; skipping configuration publish.");
             return;
         }
 
-        _ = PublishToGatewayAsync($"{domain}/{endpoint}", accessEvent);
+        var url = BuildUrl(domain, endpoint);
+        _ = PublishToGatewayAsync(url, message);
     }
 
-    private async Task PublishToGatewayAsync(string url, ParkingAccessEvent accessEvent)
+    private void PublishAccessEvent(ParkingAccessEvent accessEvent)
+    {
+        var domain = _configuration["Gateway:Domain"];
+        var endpoint = _configuration["Gateway:AccessEndpoint"];
+
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
+        {
+            _logger.LogDebug("Gateway:Domain or Gateway:AccessEndpoint not configured; skipping access publish.");
+            return;
+        }
+
+        var url = BuildUrl(domain, endpoint);
+        _ = PublishToGatewayAsync(url, accessEvent);
+    }
+
+    private async Task PublishToGatewayAsync<T>(string url, T payload)
     {
         try
         {
-            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            var json = JsonSerializer.Serialize(accessEvent, opts);
+            var opts = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            };
+
+            var json = JsonSerializer.Serialize(payload, opts);
+
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode)
-                _logger.LogWarning("Publishing tag to {Url} returned {Status}", url, resp.StatusCode);
+
+            var response = await _httpClient.PostAsync(url, content)
+                .ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Publishing payload to {Url} returned {Status}",
+                    url,
+                    response.StatusCode);
+            }
             else
-                _logger.LogDebug("Published tag to {Url}", url);
+            {
+                _logger.LogDebug("Published payload to {Url}", url);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to publish tag to {Url}", url);
+            _logger.LogError(ex, "Failed to publish payload to {Url}", url);
         }
+    }
+
+    private static string BuildUrl(string domain, string endpoint)
+    {
+        return $"{domain.TrimEnd('/')}/{endpoint.TrimStart('/')}";
+    }
+
+    private void LogTag(TagReadMessage message)
+    {
+        _logger.LogInformation(
+            "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
+            message.Epc,
+            message.AntennaPort,
+            message.PeakRssiInDbm,
+            message.FirstSeenUtc,
+            message.LastSeenUtc,
+            message.SeenCount,
+            message.Tid);
     }
 
     private void OnKeepaliveReceived(ImpinjReader _)

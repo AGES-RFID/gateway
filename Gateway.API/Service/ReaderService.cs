@@ -6,6 +6,12 @@ public sealed class ReaderService
 {
     private readonly ImpinjReader _reader = new();
     private readonly object _sync = new();
+    private readonly ILogger<ReaderService> _logger;
+
+    public ReaderService(ILogger<ReaderService> logger)
+    {
+        _logger = logger;
+    }
 
     public bool IsConnected => _reader.IsConnected;
 
