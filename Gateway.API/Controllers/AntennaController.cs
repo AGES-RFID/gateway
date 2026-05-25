@@ -11,8 +11,13 @@ namespace RfidGateway.Controllers;
 public sealed class AntennaController : ControllerBase
 {
     private readonly ReaderService _reader;
+    private readonly ILogger<AntennaController> _logger;
 
-    public AntennaController(ReaderService reader) => _reader = reader;
+    public AntennaController(ReaderService reader, ILogger<AntennaController> logger)
+    {
+        _reader = reader;
+        _logger = logger;
+    }
 
     [HttpGet]
     public IActionResult GetAll()
@@ -26,8 +31,9 @@ public sealed class AntennaController : ControllerBase
                 results.Add(ToResponse(config, status));
             return Ok(results);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Failed to query reader.");
             return StatusCode(503, "Reader is not available.");
         }
     }
@@ -43,8 +49,9 @@ public sealed class AntennaController : ControllerBase
             var config = settings.Antennas.GetAntenna((ushort)portNumber);
             return config is null ? NotFound() : Ok(ToResponse(config, status));
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Failed to query reader.");
             return StatusCode(503, "Reader is not available.");
         }
     }
@@ -53,34 +60,35 @@ public sealed class AntennaController : ControllerBase
     public IActionResult Update(int portNumber, [FromBody] AntennaUpdateRequest request)
     {
         if (portNumber < 1) return BadRequest("Port number must be positive.");
+        if (!request.TxPower.HasValue && !request.RxSensitivity.HasValue)
+            return BadRequest("At least one field (txPower or rxSensitivity) must be provided.");
         try
         {
-            var settings = _reader.QuerySettings();
-            var antenna = settings.Antennas.GetAntenna((ushort)portNumber);
-            if (antenna is null) return NotFound();
-
-            if (request.TxPowerInDbm.HasValue)        antenna.TxPowerInDbm       = request.TxPowerInDbm.Value;
-            if (request.RxSensitivityInDbm.HasValue)  antenna.RxSensitivityInDbm = request.RxSensitivityInDbm.Value;
-
-            _reader.ApplySettingsWithoutReset(settings);
-            return NoContent();
+            var found = _reader.UpdateAntenna((ushort)portNumber, antenna =>
+            {
+                if (request.TxPower.HasValue)       antenna.TxPowerInDbm       = request.TxPower.Value;
+                if (request.RxSensitivity.HasValue) antenna.RxSensitivityInDbm = request.RxSensitivity.Value;
+            });
+            return found ? NoContent() : NotFound();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Failed to update antenna {Port}.", portNumber);
             return StatusCode(503, "Reader is not available.");
         }
     }
 
-    private static AntennaResponse ToResponse(AntennaConfig config, Status status)
+    private AntennaResponse ToResponse(AntennaConfig config, Status status)
     {
         OctaneAntennaStatus? antennaStatus = null;
-        try { antennaStatus = status.Antennas.GetAntenna(config.PortNumber); } catch { }
+        try { antennaStatus = status.Antennas.GetAntenna(config.PortNumber); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Could not get status for antenna {Port}.", config.PortNumber); }
 
         return new AntennaResponse(
-            PortNumber: config.PortNumber,
-            TxPowerInDbm: config.TxPowerInDbm,
-            RxSensitivityInDbm: config.RxSensitivityInDbm,
-            IsConnected: antennaStatus?.IsConnected ?? false
+            Port: config.PortNumber,
+            TxPower: config.TxPowerInDbm,
+            RxSensitivity: config.RxSensitivityInDbm,
+            Connected: antennaStatus?.IsConnected ?? false
         );
     }
 }

@@ -1,11 +1,11 @@
 namespace RfidGateway.Models;
 
 public sealed record ReaderStatus(
-    bool IsConnected,
+    bool Connected,
     IReadOnlyList<AntennaStat> Antennas
 );
 
 public sealed record AntennaStat(
-    int Port,
-    bool IsConnected
+    ushort Port,
+    bool Connected
 );

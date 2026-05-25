@@ -4,7 +4,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RfidGateway.Models;
 using System.Collections.Concurrent;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 
@@ -14,11 +13,9 @@ public sealed class RfidReaderWorker : BackgroundService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<RfidReaderWorker> _logger;
-    private ImpinjReader? _reader;
-    private readonly HttpClient _httpClient = new HttpClient();
-    
     private readonly ReaderService _readerService;
     private readonly ReaderStatusService _status;
+    private readonly HttpClient _httpClient = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
     private TimeSpan _tagCooldown;
 
@@ -73,6 +70,7 @@ public sealed class RfidReaderWorker : BackgroundService
 
         _status.SetConnected(true);
         _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
+
         return base.StartAsync(cancellationToken);
     }
 
@@ -115,12 +113,10 @@ public sealed class RfidReaderWorker : BackgroundService
 
             var now = DateTime.UtcNow;
             if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
-            {
                 continue;
-            }
+
             _lastPublishedAt[message.Epc] = now;
 
-            var tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null;
             var accessEvent = new ParkingAccessEvent
             {
                 Tid = message.Tid ?? string.Empty,

@@ -25,11 +25,6 @@ public sealed class ReaderService
 
     public void ApplySettings(Settings settings) { lock (_sync) _reader.ApplySettings(settings); }
 
-    public void ApplySettingsWithoutReset(Settings settings)
-    {
-        lock (_sync) _reader.ApplySettingsWithoutFactoryReset(settings);
-    }
-
     public void Start() { lock (_sync) _reader.Start(); }
 
     public void Stop() { lock (_sync) _reader.Stop(); }
@@ -39,4 +34,17 @@ public sealed class ReaderService
     public Settings QuerySettings() { lock (_sync) return _reader.QuerySettings(); }
 
     public Status QueryReaderStatus() { lock (_sync) return _reader.QueryStatus(); }
+
+    public bool UpdateAntenna(ushort portNumber, Action<AntennaConfig> configure)
+    {
+        lock (_sync)
+        {
+            var settings = _reader.QuerySettings();
+            var antenna = settings.Antennas.GetAntenna(portNumber);
+            if (antenna is null) return false;
+            configure(antenna);
+            _reader.ApplySettingsWithoutFactoryReset(settings);
+            return true;
+        }
+    }
 }
