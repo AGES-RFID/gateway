@@ -4,8 +4,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RfidGateway.Models;
 using System.Collections.Concurrent;
-using System.Text;
-using System.Text.Json;
 
 namespace RfidGateway.Services;
 
@@ -13,22 +11,24 @@ public sealed class RfidReaderWorker : BackgroundService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<RfidReaderWorker> _logger;
-    private readonly ReaderService _readerService;
+    private readonly IReaderService _readerService;
     private readonly ReaderStatusService _status;
-    private readonly HttpClient _httpClient = new();
+    private readonly IGatewayPublisher _publisher;
     private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
-    private TimeSpan _tagCooldown;
+    internal TimeSpan _tagCooldown;
 
     public RfidReaderWorker(
         IConfiguration configuration,
         ILogger<RfidReaderWorker> logger,
-        ReaderService readerService,
-        ReaderStatusService status)
+        IReaderService readerService,
+        ReaderStatusService status,
+        IGatewayPublisher publisher)
     {
         _configuration = configuration;
         _logger = logger;
         _readerService = readerService;
         _status = status;
+        _publisher = publisher;
     }
 
     public override Task StartAsync(CancellationToken cancellationToken)
@@ -41,28 +41,7 @@ public sealed class RfidReaderWorker : BackgroundService
         _logger.LogInformation("Connecting to Impinj reader at {Hostname}", hostname);
         _readerService.Connect(hostname);
 
-        var settings = _readerService.QueryDefaultSettings();
-
-        settings.Report.Mode = ReportMode.Individual;
-        settings.Report.IncludeAntennaPortNumber = true;
-        settings.Report.IncludeFastId = _configuration.GetValue("Reader:IncludeFastId", true);
-        settings.Report.IncludePeakRssi = _configuration.GetValue("Reader:IncludePeakRssi", true);
-        settings.Report.IncludeFirstSeenTime = _configuration.GetValue("Reader:IncludeFirstSeenTime", true);
-        settings.Report.IncludeLastSeenTime = _configuration.GetValue("Reader:IncludeLastSeenTime", true);
-        settings.Report.IncludeSeenCount = _configuration.GetValue("Reader:IncludeSeenCount", true);
-
-        var antennaIds = _configuration.GetSection("Reader:AntennaIds").Get<ushort[]>() ?? Array.Empty<ushort>();
-        settings.Antennas.DisableAll();
-
-        if (antennaIds.Length == 0)
-            settings.Antennas.EnableAll();
-        else
-            settings.Antennas.EnableById(antennaIds);
-
-        settings.Session = _configuration.GetValue<ushort?>("Reader:Session") ?? 2;
-        settings.TagPopulationEstimate = _configuration.GetValue<ushort?>("Reader:TagPopulationEstimate") ?? 32;
-
-        _readerService.ApplySettings(settings);
+        _readerService.ConfigureAndApplySettings(_configuration);
         _readerService.Start();
 
         var cooldownSeconds = _configuration.GetValue("Reader:TagCooldownSeconds", 30);
@@ -111,64 +90,36 @@ public sealed class RfidReaderWorker : BackgroundService
                 Tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null
             };
 
-            var now = DateTime.UtcNow;
-            if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
-                continue;
-
-            _lastPublishedAt[message.Epc] = now;
-
-            var accessEvent = new ParkingAccessEvent
-            {
-                Tid = message.Tid ?? string.Empty,
-                Epc = message.Epc,
-                Entrance = message.AntennaPort == 1,
-            };
-
-            _logger.LogInformation(
-                "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
-                message.Epc,
-                message.AntennaPort,
-                message.PeakRssiInDbm,
-                message.FirstSeenUtc,
-                message.LastSeenUtc,
-                message.SeenCount,
-                message.Tid);
-
-            PublishToGateway(accessEvent);
+            ProcessTag(message);
         }
     }
 
-    private void PublishToGateway(ParkingAccessEvent accessEvent)
+    internal void ProcessTag(TagReadMessage message)
     {
-        var domain = _configuration["Gateway:Domain"];
-        var endpoint = _configuration["Gateway:Endpoint"];
-
-        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
-        {
-            _logger.LogDebug("Gateway:Domain or Gateway:Endpoint not configured; skipping publish.");
+        var now = DateTime.UtcNow;
+        if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
             return;
-        }
 
-        _ = PublishToGatewayAsync($"{domain}/{endpoint}", accessEvent);
-    }
+        _lastPublishedAt[message.Epc] = now;
 
-    private async Task PublishToGatewayAsync(string url, ParkingAccessEvent accessEvent)
-    {
-        try
+        var accessEvent = new ParkingAccessEvent
         {
-            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            var json = JsonSerializer.Serialize(accessEvent, opts);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode)
-                _logger.LogWarning("Publishing tag to {Url} returned {Status}", url, resp.StatusCode);
-            else
-                _logger.LogDebug("Published tag to {Url}", url);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to publish tag to {Url}", url);
-        }
+            Tid = message.Tid ?? string.Empty,
+            Epc = message.Epc,
+            Entrance = message.AntennaPort == 1,
+        };
+
+        _logger.LogInformation(
+            "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
+            message.Epc,
+            message.AntennaPort,
+            message.PeakRssiInDbm,
+            message.FirstSeenUtc,
+            message.LastSeenUtc,
+            message.SeenCount,
+            message.Tid);
+
+        _ = _publisher.PublishAsync(accessEvent);
     }
 
     private void OnKeepaliveReceived(ImpinjReader _)

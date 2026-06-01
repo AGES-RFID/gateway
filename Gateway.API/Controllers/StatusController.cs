@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using RfidGateway.Models;
 using RfidGateway.Services;
-using OctaneAntennaStatus = Impinj.OctaneSdk.AntennaStatus;
 
 namespace RfidGateway.Controllers;
 
@@ -10,10 +9,10 @@ namespace RfidGateway.Controllers;
 public sealed class StatusController : ControllerBase
 {
     private readonly ReaderStatusService _status;
-    private readonly ReaderService _reader;
+    private readonly IReaderService _reader;
     private readonly ILogger<StatusController> _logger;
 
-    public StatusController(ReaderStatusService status, ReaderService reader, ILogger<StatusController> logger)
+    public StatusController(ReaderStatusService status, IReaderService reader, ILogger<StatusController> logger)
     {
         _status = status;
         _reader = reader;
@@ -24,15 +23,13 @@ public sealed class StatusController : ControllerBase
     public IActionResult Get()
     {
         var connected = _status.IsConnected;
-        var antennas = new List<AntennaStat>();
+        IReadOnlyList<AntennaStat> antennas = [];
 
         if (connected)
         {
             try
             {
-                var sdkStatus = _reader.QueryReaderStatus();
-                foreach (OctaneAntennaStatus a in sdkStatus.Antennas)
-                    antennas.Add(new AntennaStat(a.PortNumber, a.IsConnected));
+                antennas = _reader.GetAntennaStats();
             }
             catch (Exception ex)
             {
