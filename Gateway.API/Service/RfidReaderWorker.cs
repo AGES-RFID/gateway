@@ -4,10 +4,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RfidGateway.Models;
 using System.Collections.Concurrent;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Tasks;
 
 namespace RfidGateway.Services;
 
@@ -15,15 +13,22 @@ public sealed class RfidReaderWorker : BackgroundService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<RfidReaderWorker> _logger;
-    private ImpinjReader? _reader;
-    private readonly HttpClient _httpClient = new HttpClient();
+    private readonly ReaderService _readerService;
+    private readonly ReaderStatusService _status;
+    private readonly HttpClient _httpClient = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
     private TimeSpan _tagCooldown;
 
-    public RfidReaderWorker(IConfiguration configuration, ILogger<RfidReaderWorker> logger)
+    public RfidReaderWorker(
+        IConfiguration configuration,
+        ILogger<RfidReaderWorker> logger,
+        ReaderService readerService,
+        ReaderStatusService status)
     {
         _configuration = configuration;
         _logger = logger;
+        _readerService = readerService;
+        _status = status;
     }
 
     public override Task StartAsync(CancellationToken cancellationToken)
@@ -31,15 +36,12 @@ public sealed class RfidReaderWorker : BackgroundService
         var hostname = _configuration["Reader:Hostname"]
             ?? throw new InvalidOperationException("Reader:Hostname was not configured.");
 
-        _reader = new ImpinjReader();
-        _reader.TagsReported += OnTagsReported;
-        _reader.KeepaliveReceived += OnKeepaliveReceived;
-        _reader.ConnectionLost += OnConnectionLost;
+        _readerService.SubscribeToEvents(OnTagsReported, OnKeepaliveReceived, OnConnectionLost);
 
         _logger.LogInformation("Connecting to Impinj reader at {Hostname}", hostname);
-        _reader.Connect(hostname);
+        _readerService.Connect(hostname);
 
-        var settings = _reader.QueryDefaultSettings();
+        var settings = _readerService.QueryDefaultSettings();
 
         settings.Report.Mode = ReportMode.Individual;
         settings.Report.IncludeAntennaPortNumber = true;
@@ -53,63 +55,48 @@ public sealed class RfidReaderWorker : BackgroundService
         settings.Antennas.DisableAll();
 
         if (antennaIds.Length == 0)
-        {
             settings.Antennas.EnableAll();
-        }
         else
-        {
             settings.Antennas.EnableById(antennaIds);
-        }
-
-        // settings.ReaderMode = ParseReaderMode(
-        //     _configuration["Reader:ReaderMode"],
-        //     ReaderMode.AutoSetDenseReader);
-
-        // settings.SearchMode = ParseSearchMode(
-        //     _configuration["Reader:SearchMode"],
-        //     SearchMode.DualTarget);
 
         settings.Session = _configuration.GetValue<ushort?>("Reader:Session") ?? 2;
         settings.TagPopulationEstimate = _configuration.GetValue<ushort?>("Reader:TagPopulationEstimate") ?? 32;
 
-        _reader.ApplySettings(settings);
-        _reader.Start();
+        _readerService.ApplySettings(settings);
+        _readerService.Start();
 
         var cooldownSeconds = _configuration.GetValue("Reader:TagCooldownSeconds", 30);
         _tagCooldown = TimeSpan.FromSeconds(cooldownSeconds);
 
+        _status.SetConnected(true);
         _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
+
         return base.StartAsync(cancellationToken);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
-        {
             await Task.Delay(1000, stoppingToken);
-        }
     }
 
     public override Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_reader is not null)
+        try
         {
-            try
-            {
-                _logger.LogInformation("Stopping reader.");
-                _reader.Stop();
-                _reader.Disconnect();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error while stopping/disconnecting reader.");
-            }
+            _logger.LogInformation("Stopping reader.");
+            _readerService.Stop();
+            _readerService.Disconnect();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error while stopping/disconnecting reader.");
         }
 
         return base.StopAsync(cancellationToken);
     }
 
-    private void OnTagsReported(ImpinjReader sender, TagReport report)
+    private void OnTagsReported(ImpinjReader _, TagReport report)
     {
         foreach (Tag tag in report)
         {
@@ -126,15 +113,13 @@ public sealed class RfidReaderWorker : BackgroundService
 
             var now = DateTime.UtcNow;
             if (_lastPublishedAt.TryGetValue(message.Epc, out var lastSeen) && now - lastSeen < _tagCooldown)
-            {
                 continue;
-            }
+
             _lastPublishedAt[message.Epc] = now;
 
-            var tid = tag.IsFastIdPresent ? tag.Tid.ToHexString() : null;
             var accessEvent = new ParkingAccessEvent
             {
-                Tid = message.Tid,
+                Tid = message.Tid ?? string.Empty,
                 Epc = message.Epc,
                 Entrance = message.AntennaPort == 1,
             };
@@ -147,8 +132,7 @@ public sealed class RfidReaderWorker : BackgroundService
                 message.FirstSeenUtc,
                 message.LastSeenUtc,
                 message.SeenCount,
-                message.Tid
-            );
+                message.Tid);
 
             PublishToGateway(accessEvent);
         }
@@ -158,15 +142,14 @@ public sealed class RfidReaderWorker : BackgroundService
     {
         var domain = _configuration["Gateway:Domain"];
         var endpoint = _configuration["Gateway:Endpoint"];
-        
+
         if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
         {
             _logger.LogDebug("Gateway:Domain or Gateway:Endpoint not configured; skipping publish.");
             return;
         }
 
-        var url = $"{domain}/{endpoint}";
-        _ = PublishToGatewayAsync(url, accessEvent);
+        _ = PublishToGatewayAsync($"{domain}/{endpoint}", accessEvent);
     }
 
     private async Task PublishToGatewayAsync(string url, ParkingAccessEvent accessEvent)
@@ -178,13 +161,9 @@ public sealed class RfidReaderWorker : BackgroundService
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
-            {
                 _logger.LogWarning("Publishing tag to {Url} returned {Status}", url, resp.StatusCode);
-            }
             else
-            {
                 _logger.LogDebug("Published tag to {Url}", url);
-            }
         }
         catch (Exception ex)
         {
@@ -192,33 +171,14 @@ public sealed class RfidReaderWorker : BackgroundService
         }
     }
 
-    private void OnKeepaliveReceived(ImpinjReader sender)
+    private void OnKeepaliveReceived(ImpinjReader _)
     {
         _logger.LogDebug("Keepalive received from reader.");
     }
 
-    private void OnConnectionLost(ImpinjReader sender)
+    private void OnConnectionLost(ImpinjReader _)
     {
+        _status.SetConnected(false);
         _logger.LogWarning("Connection lost to reader.");
-    }
-
-    private static ReaderMode ParseReaderMode(string? value, ReaderMode fallback)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return fallback;
-
-        return Enum.TryParse<ReaderMode>(value, true, out var parsed)
-            ? parsed
-            : fallback;
-    }
-
-    private static SearchMode ParseSearchMode(string? value, SearchMode fallback)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return fallback;
-
-        return Enum.TryParse<SearchMode>(value, true, out var parsed)
-            ? parsed
-            : fallback;
     }
 }
