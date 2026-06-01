@@ -60,14 +60,14 @@ public sealed class AntennaController : ControllerBase
     public IActionResult Update(int portNumber, [FromBody] AntennaUpdateRequest request)
     {
         if (portNumber < 1) return BadRequest("Port number must be positive.");
-        if (!request.TxPower.HasValue && !request.RxSensitivity.HasValue)
-            return BadRequest("At least one field (txPower or rxSensitivity) must be provided.");
+        if (!request.Power.HasValue && !request.Sensitivity.HasValue)
+            return BadRequest("At least one field (power or sensitivity) must be provided.");
         try
         {
             var found = _reader.UpdateAntenna((ushort)portNumber, antenna =>
             {
-                if (request.TxPower.HasValue)       antenna.TxPowerInDbm       = request.TxPower.Value;
-                if (request.RxSensitivity.HasValue) antenna.RxSensitivityInDbm = request.RxSensitivity.Value;
+                if (request.Power.HasValue)       antenna.TxPowerInDbm       = request.Power.Value;
+                if (request.Sensitivity.HasValue) antenna.RxSensitivityInDbm = request.Sensitivity.Value;
             });
             return found ? NoContent() : NotFound();
         }
@@ -86,8 +86,8 @@ public sealed class AntennaController : ControllerBase
 
         return new AntennaResponse(
             Port: config.PortNumber,
-            TxPower: config.TxPowerInDbm,
-            RxSensitivity: config.RxSensitivityInDbm,
+            Power: config.TxPowerInDbm,
+            Sensitivity: config.RxSensitivityInDbm,
             Connected: antennaStatus?.IsConnected ?? false
         );
     }

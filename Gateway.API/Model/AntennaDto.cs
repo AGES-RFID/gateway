@@ -2,12 +2,12 @@ namespace RfidGateway.Models;
 
 public sealed record AntennaResponse(
     ushort Port,
-    double TxPower,
-    double RxSensitivity,
+    double Power,
+    double Sensitivity,
     bool Connected
 );
 
 public sealed record AntennaUpdateRequest(
-    double? TxPower,
-    double? RxSensitivity
+    double? Power,
+    double? Sensitivity
 );
