@@ -1,6 +1,5 @@
 using Impinj.OctaneSdk;
 using Microsoft.Extensions.Configuration;
-using RfidGateway.Models;
 
 namespace RfidGateway.Services;
 
@@ -8,10 +7,7 @@ public interface IReaderService
 {
     bool IsConnected { get; }
 
-    IReadOnlyList<AntennaResponse> GetAntennas();
-    AntennaResponse? GetAntenna(ushort port);
-    bool UpdateAntenna(ushort portNumber, double? power, double? sensitivity);
-    IReadOnlyList<AntennaStat> GetAntennaStats();
+    IReadOnlyList<Models.AntennaStatus> GetAntennaStatus();
 
     void SubscribeToEvents(
         Action<ImpinjReader, TagReport> onTagsReported,

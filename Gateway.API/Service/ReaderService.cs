@@ -59,63 +59,23 @@ public sealed class ReaderService : IReaderService
 
     public void Disconnect() { lock (_sync) _reader.Disconnect(); }
 
-    public IReadOnlyList<AntennaResponse> GetAntennas()
+    public IReadOnlyList<Models.AntennaStatus> GetAntennaStatus()
     {
         lock (_sync)
         {
             var settings = _reader.QuerySettings();
             var status = _reader.QueryStatus();
-            var result = new List<AntennaResponse>();
+            var result = new List<Models.AntennaStatus>();
             foreach (AntennaConfig a in settings.Antennas)
             {
-                AntennaStatus? antennaStatus = null;
+                Impinj.OctaneSdk.AntennaStatus? antennaStatus = null;
                 try { antennaStatus = status.Antennas.GetAntenna(a.PortNumber); } catch { }
-                result.Add(new AntennaResponse(a.PortNumber, a.TxPowerInDbm, a.RxSensitivityInDbm, antennaStatus?.IsConnected ?? false));
+                result.Add(new Models.AntennaStatus(
+                    a.PortNumber,
+                    antennaStatus?.IsConnected ?? false,
+                    a.TxPowerInDbm,
+                    a.RxSensitivityInDbm));
             }
-            return result;
-        }
-    }
-
-    public AntennaResponse? GetAntenna(ushort port)
-    {
-        lock (_sync)
-        {
-            var settings = _reader.QuerySettings();
-            var config = settings.Antennas.GetAntenna(port);
-            if (config is null) return null;
-            AntennaStatus? antennaStatus = null;
-            try
-            {
-                var status = _reader.QueryStatus();
-                antennaStatus = status.Antennas.GetAntenna(port);
-            }
-            catch { }
-            return new AntennaResponse(config.PortNumber, config.TxPowerInDbm, config.RxSensitivityInDbm, antennaStatus?.IsConnected ?? false);
-        }
-    }
-
-    public bool UpdateAntenna(ushort portNumber, double? power, double? sensitivity)
-    {
-        lock (_sync)
-        {
-            var settings = _reader.QuerySettings();
-            var antenna = settings.Antennas.GetAntenna(portNumber);
-            if (antenna is null) return false;
-            if (power.HasValue) antenna.TxPowerInDbm = power.Value;
-            if (sensitivity.HasValue) antenna.RxSensitivityInDbm = sensitivity.Value;
-            _reader.ApplySettingsWithoutFactoryReset(settings);
-            return true;
-        }
-    }
-
-    public IReadOnlyList<AntennaStat> GetAntennaStats()
-    {
-        lock (_sync)
-        {
-            var status = _reader.QueryStatus();
-            var result = new List<AntennaStat>();
-            foreach (AntennaStatus a in status.Antennas)
-                result.Add(new AntennaStat(a.PortNumber, a.IsConnected));
             return result;
         }
     }

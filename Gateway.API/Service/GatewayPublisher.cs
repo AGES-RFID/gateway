@@ -19,7 +19,7 @@ public sealed class GatewayPublisher : IGatewayPublisher
         _logger = logger;
     }
 
-    public async Task PublishAsync(ParkingAccessEvent accessEvent)
+    public async Task PublishTagsAsync(ParkingAccessEvent accessEvent)
     {
         var domain = _configuration["Gateway:Domain"];
         var endpoint = _configuration["Gateway:Endpoint"];
@@ -44,6 +44,34 @@ public sealed class GatewayPublisher : IGatewayPublisher
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish tag to {Domain}", domain);
+        }
+    }
+
+    public async Task PublishStatusAsync(ReaderStatus status)
+    {
+        var domain = _configuration["Gateway:Domain"];
+        var endpoint = _configuration["Gateway:StatusEndpoint"] ?? "api/status";
+
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
+        {
+            _logger.LogDebug("Gateway:Domain or Gateway:StatusEndpoint not configured; skipping status publish.");
+            return;
+        }
+
+        try
+        {
+            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var json = JsonSerializer.Serialize(status, opts);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                _logger.LogWarning("Publishing status to {Domain} returned {Status}", domain, resp.StatusCode);
+            else
+                _logger.LogDebug("Published status to {Domain}", domain);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish status to {Domain}", domain);
         }
     }
 }

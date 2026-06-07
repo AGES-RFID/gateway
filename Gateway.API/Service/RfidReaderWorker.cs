@@ -7,7 +7,7 @@ using System.Collections.Concurrent;
 
 namespace RfidGateway.Services;
 
-public sealed class RfidReaderWorker : BackgroundService
+public sealed class RfidReaderWorker : IHostedService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<RfidReaderWorker> _logger;
@@ -15,6 +15,7 @@ public sealed class RfidReaderWorker : BackgroundService
     private readonly ReaderStatusService _status;
     private readonly IGatewayPublisher _publisher;
     private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
+    private ReaderStatus? _lastPublishedStatus;
     internal TimeSpan _tagCooldown;
 
     public RfidReaderWorker(
@@ -31,7 +32,7 @@ public sealed class RfidReaderWorker : BackgroundService
         _publisher = publisher;
     }
 
-    public override Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         var hostname = _configuration["Reader:Hostname"]
             ?? throw new InvalidOperationException("Reader:Hostname was not configured.");
@@ -48,31 +49,28 @@ public sealed class RfidReaderWorker : BackgroundService
         _tagCooldown = TimeSpan.FromSeconds(cooldownSeconds);
 
         _status.SetConnected(true);
+        PublishStatusIfChanged();
         _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
 
-        return base.StartAsync(cancellationToken);
+        return Task.CompletedTask;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-            await Task.Delay(1000, stoppingToken);
-    }
-
-    public override Task StopAsync(CancellationToken cancellationToken)
+    public Task StopAsync(CancellationToken cancellationToken)
     {
         try
         {
             _logger.LogInformation("Stopping reader.");
             _readerService.Stop();
             _readerService.Disconnect();
+            _status.SetConnected(false);
+            PublishStatusIfChanged();
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error while stopping/disconnecting reader.");
         }
 
-        return base.StopAsync(cancellationToken);
+        return Task.CompletedTask;
     }
 
     private void OnTagsReported(ImpinjReader _, TagReport report)
@@ -119,17 +117,58 @@ public sealed class RfidReaderWorker : BackgroundService
             message.SeenCount,
             message.Tid);
 
-        _ = _publisher.PublishAsync(accessEvent);
+        _ = _publisher.PublishTagsAsync(accessEvent);
     }
 
     private void OnKeepaliveReceived(ImpinjReader _)
     {
         _logger.LogDebug("Keepalive received from reader.");
+        PublishStatusIfChanged();
     }
 
     private void OnConnectionLost(ImpinjReader _)
     {
         _status.SetConnected(false);
+        PublishStatusIfChanged();
         _logger.LogWarning("Connection lost to reader.");
     }
+
+    private void PublishStatusIfChanged()
+    {
+        var status = GetCurrentStatus();
+        if (StatusEquals(_lastPublishedStatus, status))
+            return;
+
+        _lastPublishedStatus = status;
+        _ = _publisher.PublishStatusAsync(status);
+    }
+
+    private ReaderStatus GetCurrentStatus()
+    {
+        var connected = _status.IsConnected;
+        IReadOnlyList<Models.AntennaStatus> antennas = [];
+
+        if (connected)
+        {
+            try
+            {
+                antennas = _readerService
+                    .GetAntennaStatus()
+                    .OrderBy(a => a.Port)
+                    .ToArray();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to query antenna status.");
+                connected = false;
+            }
+        }
+
+        return new ReaderStatus(connected, antennas);
+    }
+
+    private static bool StatusEquals(ReaderStatus? current, ReaderStatus next) =>
+        current is not null &&
+        current.Connected == next.Connected &&
+        current.Antennas.SequenceEqual(next.Antennas);
 }

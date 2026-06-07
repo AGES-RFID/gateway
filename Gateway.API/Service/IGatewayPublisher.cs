@@ -4,5 +4,6 @@ namespace RfidGateway.Services;
 
 public interface IGatewayPublisher
 {
-    Task PublishAsync(ParkingAccessEvent accessEvent);
+    Task PublishTagsAsync(ParkingAccessEvent accessEvent);
+    Task PublishStatusAsync(ReaderStatus status);
 }
