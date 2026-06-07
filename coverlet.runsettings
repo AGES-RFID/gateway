@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <ExcludeByFile>**/Program.cs,**/Microsoft.AspNetCore.OpenApi.SourceGenerators/**/*.cs</ExcludeByFile>
+          <Exclude>[*]Microsoft.AspNetCore.OpenApi.Generated*,[*]System.Runtime.CompilerServices.*</Exclude>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
