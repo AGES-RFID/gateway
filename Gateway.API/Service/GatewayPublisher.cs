@@ -11,12 +11,18 @@ public sealed class GatewayPublisher : IGatewayPublisher
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
     private readonly ILogger<GatewayPublisher> _logger;
+    private readonly IReaderService _reader;
 
-    public GatewayPublisher(HttpClient httpClient, IConfiguration configuration, ILogger<GatewayPublisher> logger)
+    public GatewayPublisher(
+        HttpClient httpClient,
+        IConfiguration configuration,
+        ILogger<GatewayPublisher> logger,
+        IReaderService reader)
     {
         _httpClient = httpClient;
         _configuration = configuration;
         _logger = logger;
+        _reader = reader;
     }
 
     public async Task PublishTagsAsync(ParkingAccessEvent accessEvent)
@@ -36,10 +42,18 @@ public sealed class GatewayPublisher : IGatewayPublisher
             var json = JsonSerializer.Serialize(accessEvent, opts);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+
             if (!resp.IsSuccessStatusCode)
+            {
                 _logger.LogWarning("Publishing tag to {Domain} returned {Status}", domain, resp.StatusCode);
-            else
-                _logger.LogDebug("Published tag to {Domain}", domain);
+                return;
+            }
+
+            _logger.LogDebug("Published tag to {Domain}", domain);
+
+            var gpoPort = _configuration.GetValue<ushort>("Reader:GpoPort", 1);
+            var gpoDuration = _configuration.GetValue("Reader:GpoDurationSeconds", 15);
+            _ = ActivateGpoAsync(gpoPort, gpoDuration);
         }
         catch (Exception ex)
         {
@@ -72,6 +86,25 @@ public sealed class GatewayPublisher : IGatewayPublisher
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish status to {Domain}", domain);
+        }
+    }
+
+    private async Task ActivateGpoAsync(ushort portNumber, int durationSeconds)
+    {
+        try
+        {
+            _reader.SetGpo(portNumber, true);
+            _logger.LogInformation("GPO port {Port} activated for {Duration}s", portNumber, durationSeconds);
+
+            await Task.Delay(TimeSpan.FromSeconds(durationSeconds)).ConfigureAwait(false);
+
+            _reader.SetGpo(portNumber, false);
+            _logger.LogInformation("GPO port {Port} deactivated", portNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to control GPO port {Port}", portNumber);
+            try { _reader.SetGpo(portNumber, false); } catch { }
         }
     }
 }
