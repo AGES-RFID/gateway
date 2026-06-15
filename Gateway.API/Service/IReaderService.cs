@@ -17,6 +17,7 @@ public interface IReaderService
         Action<ImpinjReader> onConnectionLost);
     void Connect(string hostname);
     void ConfigureAndApplySettings(IConfiguration configuration);
+    void SetGpo(ushort portNumber, bool isActive);
     void Start();
     void Stop();
     void Disconnect();

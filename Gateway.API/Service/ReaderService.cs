@@ -25,6 +25,8 @@ public sealed class ReaderService : IReaderService
 
     public void Connect(string hostname) { lock (_sync) _reader.Connect(hostname); }
 
+    public void SetGpo(ushort portNumber, bool isActive) { lock (_sync) _reader.SetGpo(portNumber, isActive); }
+
     public void ConfigureAndApplySettings(IConfiguration configuration)
     {
         lock (_sync)
