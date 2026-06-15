@@ -8,6 +8,8 @@ public interface IReaderService
     bool IsConnected { get; }
 
     IReadOnlyList<Models.AntennaStatus> GetAntennaStatus();
+    Models.AntennaConfiguration GetAntennaConfiguration();
+    void ApplyAntennaConfigurationToAll(Models.AntennaConfiguration configuration);
 
     void SubscribeToEvents(
         Action<ImpinjReader, TagReport> onTagsReported,

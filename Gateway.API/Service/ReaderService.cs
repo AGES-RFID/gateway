@@ -79,4 +79,40 @@ public sealed class ReaderService : IReaderService
             return result;
         }
     }
+
+    public Models.AntennaConfiguration GetAntennaConfiguration()
+    {
+        lock (_sync)
+        {
+            var settings = _reader.QuerySettings();
+            AntennaConfig? antenna = null;
+            foreach (AntennaConfig configuredAntenna in settings.Antennas)
+            {
+                antenna = configuredAntenna;
+                break;
+            }
+
+            if (antenna is null)
+                throw new InvalidOperationException("No antenna configuration was found on the reader.");
+
+            return new Models.AntennaConfiguration(
+                antenna.TxPowerInDbm,
+                antenna.RxSensitivityInDbm);
+        }
+    }
+
+    public void ApplyAntennaConfigurationToAll(Models.AntennaConfiguration configuration)
+    {
+        lock (_sync)
+        {
+            var settings = _reader.QuerySettings();
+            foreach (AntennaConfig antenna in settings.Antennas)
+            {
+                antenna.TxPowerInDbm = configuration.Power;
+                antenna.RxSensitivityInDbm = configuration.Sensitivity;
+            }
+
+            _reader.ApplySettings(settings);
+        }
+    }
 }

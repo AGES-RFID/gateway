@@ -1,5 +1,6 @@
 using Impinj.OctaneSdk;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -12,6 +13,7 @@ public class RfidReaderWorkerTests
 {
     private readonly IReaderService _readerService;
     private readonly IGatewayPublisher _publisher;
+    private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ReaderStatusService _statusService;
     private readonly RfidReaderWorker _worker;
 
@@ -19,6 +21,7 @@ public class RfidReaderWorkerTests
     {
         _readerService = Substitute.For<IReaderService>();
         _publisher = Substitute.For<IGatewayPublisher>();
+        _applicationLifetime = Substitute.For<IHostApplicationLifetime>();
         _statusService = new ReaderStatusService();
         var logger = Substitute.For<ILogger<RfidReaderWorker>>();
 
@@ -27,7 +30,8 @@ public class RfidReaderWorkerTests
             logger,
             _readerService,
             _statusService,
-            _publisher);
+            _publisher,
+            _applicationLifetime);
 
         _worker._tagCooldown = TimeSpan.FromSeconds(30);
     }
@@ -90,6 +94,32 @@ public class RfidReaderWorkerTests
 
         await _publisher.Received(1).PublishStatusAsync(Arg.Is<ReaderStatus>(s =>
             !s.Connected && s.Antennas.Count == 0));
+    }
+
+    [Fact]
+    public async Task StartAsync_WhenReaderIsNotFoundAfterRetryTimeout_StopsApplication()
+    {
+        var readerService = Substitute.For<IReaderService>();
+        var applicationLifetime = Substitute.For<IHostApplicationLifetime>();
+        var worker = new RfidReaderWorker(
+            BuildConfig(new Dictionary<string, string?>
+            {
+                ["Reader:Hostname"] = "missing-reader",
+                ["Reader:StartupRetryTimeoutMinutes"] = "0",
+                ["Reader:StartupRetryIntervalSeconds"] = "0"
+            }),
+            Substitute.For<ILogger<RfidReaderWorker>>(),
+            readerService,
+            new ReaderStatusService(),
+            Substitute.For<IGatewayPublisher>(),
+            applicationLifetime);
+        readerService.When(x => x.Connect("missing-reader"))
+            .Throw(new Exception("reader unavailable"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            worker.StartAsync(CancellationToken.None));
+
+        applicationLifetime.Received(1).StopApplication();
     }
 
     // --- StopAsync ---
@@ -382,7 +412,8 @@ public class RfidReaderWorkerTests
             Substitute.For<ILogger<RfidReaderWorker>>(),
             Substitute.For<IReaderService>(),
             new ReaderStatusService(),
-            Substitute.For<IGatewayPublisher>());
+            Substitute.For<IGatewayPublisher>(),
+            Substitute.For<IHostApplicationLifetime>());
 
     private static IConfiguration BuildConfig(Dictionary<string, string?> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
