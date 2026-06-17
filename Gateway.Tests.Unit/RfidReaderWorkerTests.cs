@@ -390,6 +390,35 @@ public class RfidReaderWorkerTests
     }
 
     [Fact]
+    public void ProcessTag_WhenConfigurationModeIsEnabled_PublishesTagForCreation()
+    {
+        var worker = CreateWorker(new Dictionary<string, string?>
+        {
+            ["Reader:Hostname"] = "test-reader",
+            ["Reader:ConfigurationMode"] = "true"
+        });
+        var message = new TagReadMessage { Epc = "AABBCC", AntennaPort = 1, Tid = "TID001" };
+
+        worker.ProcessTag(message);
+
+        _publisher.Received(1).PublishTagForCreationAsync(message);
+    }
+
+    [Fact]
+    public void ProcessTag_WhenConfigurationModeIsEnabled_DoesNotPublishAccessEvent()
+    {
+        var worker = CreateWorker(new Dictionary<string, string?>
+        {
+            ["Reader:Hostname"] = "test-reader",
+            ["Reader:ConfigurationMode"] = "true"
+        });
+
+        worker.ProcessTag(new TagReadMessage { Epc = "AABBCC", AntennaPort = 1, Tid = "TID001" });
+
+        _publisher.DidNotReceive().PublishTagsAsync(Arg.Any<ParkingAccessEvent>());
+    }
+
+    [Fact]
     public async Task PublishStatus_WhenAntennaStatusIncludesConnectedAndPower_SendsValues()
     {
         _readerService.GetAntennaStatus()
@@ -412,7 +441,7 @@ public class RfidReaderWorkerTests
             Substitute.For<ILogger<RfidReaderWorker>>(),
             Substitute.For<IReaderService>(),
             new ReaderStatusService(),
-            Substitute.For<IGatewayPublisher>(),
+            _publisher,
             Substitute.For<IHostApplicationLifetime>());
 
     private static IConfiguration BuildConfig(Dictionary<string, string?> values) =>

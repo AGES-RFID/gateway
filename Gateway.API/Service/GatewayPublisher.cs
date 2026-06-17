@@ -61,6 +61,38 @@ public sealed class GatewayPublisher : IGatewayPublisher
         }
     }
 
+    public async Task PublishTagForCreationAsync(TagReadMessage tag)
+    {
+        var domain = _configuration["Gateway:Domain"];
+        var endpoint = _configuration["Gateway:TagCreationEndpoint"] ?? "api/tags";
+
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
+        {
+            _logger.LogDebug("Gateway:Domain or Gateway:TagCreationEndpoint not configured; skipping tag creation publish.");
+            return;
+        }
+
+        try
+        {
+            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var json = JsonSerializer.Serialize(tag, opts);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Publishing tag for creation to {Domain} returned {Status}", domain, resp.StatusCode);
+                return;
+            }
+
+            _logger.LogDebug("Published tag for creation to {Domain}", domain);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish tag for creation to {Domain}", domain);
+        }
+    }
+
     public async Task PublishStatusAsync(ReaderStatus status)
     {
         var domain = _configuration["Gateway:Domain"];

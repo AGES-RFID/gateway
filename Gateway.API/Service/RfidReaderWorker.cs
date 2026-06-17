@@ -97,13 +97,6 @@ public sealed class RfidReaderWorker : IHostedService
 
         _lastPublishedAt[message.Epc] = now;
 
-        var accessEvent = new ParkingAccessEvent
-        {
-            Tid = message.Tid ?? string.Empty,
-            Epc = message.Epc,
-            Entrance = message.AntennaPort == 1,
-        };
-
         _logger.LogInformation(
             "TAG EPC={Epc} ANT={Antenna} RSSI={Rssi} FIRST={FirstSeen} LAST={LastSeen} COUNT={SeenCount} TID={Tid}",
             message.Epc,
@@ -113,6 +106,19 @@ public sealed class RfidReaderWorker : IHostedService
             message.LastSeenUtc,
             message.SeenCount,
             message.Tid);
+
+        if (_configuration.GetValue("Reader:ConfigurationMode", false))
+        {
+            _ = _publisher.PublishTagForCreationAsync(message);
+            return;
+        }
+
+        var accessEvent = new ParkingAccessEvent
+        {
+            Tid = message.Tid ?? string.Empty,
+            Epc = message.Epc,
+            Entrance = message.AntennaPort == 1,
+        };
 
         _ = _publisher.PublishTagsAsync(accessEvent);
     }
