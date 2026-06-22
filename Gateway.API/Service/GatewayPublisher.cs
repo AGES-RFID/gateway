@@ -54,8 +54,13 @@ public sealed class GatewayPublisher : IGatewayPublisher
 
             _logger.LogDebug("Published tag to {Url}", url);
 
-            var gpoPort = _configuration.GetValue<ushort>("Reader:GpoPort", 1);
+            var gpoPort = ResolveGpoPort(accessEvent.Entrance);
             var gpoDuration = _configuration.GetValue("Reader:GpoDurationSeconds", 15);
+            _logger.LogInformation(
+                "Access accepted as {Direction}. Opening {GateDirection} gate on GPO port {Port}.",
+                accessEvent.Entrance ? "entry" : "exit",
+                accessEvent.Entrance ? "entry" : "exit",
+                gpoPort);
             _ = ActivateGpoAsync(gpoPort, gpoDuration);
         }
         catch (Exception ex)
@@ -191,6 +196,15 @@ public sealed class GatewayPublisher : IGatewayPublisher
     {
         if (statusCode == System.Net.HttpStatusCode.NotFound)
             _logger.LogWarning("Gateway request returned 404 NotFound. Request URL: {Url}", url);
+    }
+
+    private ushort ResolveGpoPort(bool entrance)
+    {
+        var directionKey = entrance ? "Reader:EntryGpoPort" : "Reader:ExitGpoPort";
+        var directionPort = _configuration.GetValue<ushort?>(directionKey);
+        return directionPort is > 0
+            ? directionPort.Value
+            : _configuration.GetValue<ushort>("Reader:GpoPort", 1);
     }
 
     private async Task ActivateGpoAsync(ushort portNumber, int durationSeconds)
