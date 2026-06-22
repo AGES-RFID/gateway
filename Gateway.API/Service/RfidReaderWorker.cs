@@ -16,6 +16,9 @@ public sealed class RfidReaderWorker : IHostedService
     private readonly IGatewayPublisher _publisher;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ConcurrentDictionary<string, DateTime> _lastPublishedAt = new();
+    private readonly SemaphoreSlim _statusPublishLock = new(1, 1);
+    private CancellationTokenSource? _pollingCts;
+    private Task? _pollingTask;
     private ReaderStatus? _lastPublishedStatus;
     internal TimeSpan _tagCooldown;
 
@@ -48,26 +51,26 @@ public sealed class RfidReaderWorker : IHostedService
         await StartReaderWithRetryAsync(hostname, cancellationToken);
 
         _status.SetConnected(true);
-        PublishStatusIfChanged();
+        await PublishStatusAsync(force: true);
+        StartAntennaConfigurationPolling(cancellationToken);
         _logger.LogInformation("Reader started. Tag cooldown: {Cooldown}s", cooldownSeconds);
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         try
         {
             _logger.LogInformation("Stopping reader.");
+            await StopAntennaConfigurationPollingAsync();
             _readerService.Stop();
             _readerService.Disconnect();
             _status.SetConnected(false);
-            PublishStatusIfChanged();
+            await PublishStatusAsync(force: true);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error while stopping/disconnecting reader.");
         }
-
-        return Task.CompletedTask;
     }
 
     private void OnTagsReported(ImpinjReader _, TagReport report)
@@ -123,27 +126,50 @@ public sealed class RfidReaderWorker : IHostedService
         _ = _publisher.PublishTagsAsync(accessEvent);
     }
 
-    private void OnKeepaliveReceived(ImpinjReader _)
+    private void OnKeepaliveReceived(ImpinjReader reader)
     {
         _logger.LogDebug("Keepalive received from reader.");
-        PublishStatusIfChanged();
+        _ = PublishStatusAsync(force: true);
     }
 
-    private void OnConnectionLost(ImpinjReader _)
+    private void OnConnectionLost(ImpinjReader reader)
     {
         _status.SetConnected(false);
-        PublishStatusIfChanged();
+        _ = PublishStatusAsync(force: true);
         _logger.LogWarning("Connection lost to reader.");
     }
 
-    private void PublishStatusIfChanged()
+    private async Task PublishStatusAsync(bool force = false)
     {
-        var status = GetCurrentStatus();
-        if (StatusEquals(_lastPublishedStatus, status))
-            return;
+        await _statusPublishLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var status = GetCurrentStatus();
+            LogAntennaStatus(status);
 
-        _lastPublishedStatus = status;
-        _ = _publisher.PublishStatusAsync(status);
+            if (!force && StatusEquals(_lastPublishedStatus, status))
+                return;
+
+            _lastPublishedStatus = status;
+            var desiredAntennas = await _publisher.PublishStatusAsync(status).ConfigureAwait(false);
+            if (desiredAntennas.Count == 0)
+            {
+                _logger.LogInformation("Backend did not request antenna configuration changes.");
+                return;
+            }
+
+            _readerService.ApplyAntennaConfiguration(desiredAntennas);
+            var confirmedStatus = GetCurrentStatus();
+            _lastPublishedStatus = confirmedStatus;
+            await _publisher.ConfirmConfigurationAsync(confirmedStatus).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Applied antenna configuration returned by backend for ports {Ports}.",
+                string.Join(", ", desiredAntennas.Select(a => a.Port)));
+        }
+        finally
+        {
+            _statusPublishLock.Release();
+        }
     }
 
     private ReaderStatus GetCurrentStatus()
@@ -174,6 +200,90 @@ public sealed class RfidReaderWorker : IHostedService
         current is not null &&
         current.Connected == next.Connected &&
         current.Antennas.SequenceEqual(next.Antennas);
+
+    private void StartAntennaConfigurationPolling(CancellationToken cancellationToken)
+    {
+        var intervalSeconds = _configuration.GetValue<int?>("Gateway:AntennaPollingIntervalSeconds");
+        if (!intervalSeconds.HasValue || intervalSeconds.Value <= 0)
+        {
+            _logger.LogInformation("Antenna configuration polling is disabled.");
+            return;
+        }
+
+        var interval = TimeSpan.FromSeconds(intervalSeconds.Value);
+        _pollingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _pollingTask = PollAntennaConfigurationAsync(interval, _pollingCts.Token);
+        _logger.LogInformation("Antenna configuration polling enabled every {IntervalSeconds}s.", intervalSeconds.Value);
+    }
+
+    private async Task StopAntennaConfigurationPollingAsync()
+    {
+        if (_pollingCts is null || _pollingTask is null)
+            return;
+
+        await _pollingCts.CancelAsync().ConfigureAwait(false);
+
+        try
+        {
+            await _pollingTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _pollingCts.Dispose();
+            _pollingCts = null;
+            _pollingTask = null;
+        }
+    }
+
+    private async Task PollAntennaConfigurationAsync(TimeSpan interval, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(interval);
+
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            try
+            {
+                _logger.LogInformation("Checking backend for antenna configuration changes.");
+                await PublishStatusAsync(force: true).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to poll backend for antenna configuration changes.");
+            }
+        }
+    }
+
+    private void LogAntennaStatus(ReaderStatus status)
+    {
+        if (!status.Connected)
+        {
+            _logger.LogInformation("Reader disconnected. No antenna values available.");
+            return;
+        }
+
+        if (status.Antennas.Count == 0)
+        {
+            _logger.LogInformation("Reader connected, but no antenna values were reported.");
+            return;
+        }
+
+        foreach (var antenna in status.Antennas.OrderBy(a => a.Port))
+        {
+            _logger.LogInformation(
+                "Antenna {Port}: connected={Connected}, power={Power} dBm, sensitivity={Sensitivity} dBm.",
+                antenna.Port,
+                antenna.Connected,
+                antenna.Power,
+                antenna.Sensitivity);
+        }
+    }
 
     private async Task StartReaderWithRetryAsync(string hostname, CancellationToken cancellationToken)
     {

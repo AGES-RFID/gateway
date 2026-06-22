@@ -6,5 +6,6 @@ public interface IGatewayPublisher
 {
     Task PublishTagsAsync(ParkingAccessEvent accessEvent);
     Task PublishTagForCreationAsync(TagReadMessage tag);
-    Task PublishStatusAsync(ReaderStatus status);
+    Task<IReadOnlyList<AntennaStatus>> PublishStatusAsync(ReaderStatus status);
+    Task ConfirmConfigurationAsync(ReaderStatus status);
 }

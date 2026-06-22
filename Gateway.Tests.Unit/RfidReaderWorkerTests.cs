@@ -33,6 +33,10 @@ public class RfidReaderWorkerTests
             _publisher,
             _applicationLifetime);
 
+        _publisher.PublishStatusAsync(Arg.Any<ReaderStatus>())
+            .Returns(Task.FromResult<IReadOnlyList<RfidGateway.Models.AntennaStatus>>([]));
+        _publisher.ConfirmConfigurationAsync(Arg.Any<ReaderStatus>())
+            .Returns(Task.CompletedTask);
         _worker._tagCooldown = TimeSpan.FromSeconds(30);
     }
 
@@ -210,7 +214,7 @@ public class RfidReaderWorkerTests
     }
 
     [Fact]
-    public async Task OnKeepalive_WhenStatusUnchanged_DoesNotPublishStatus()
+    public async Task OnKeepalive_WhenStatusUnchanged_StillPublishesStatusForBackendPolling()
     {
         Action<ImpinjReader>? capturedCallback = null;
         _readerService.GetAntennaStatus()
@@ -226,7 +230,9 @@ public class RfidReaderWorkerTests
 
         capturedCallback!.Invoke(null!);
 
-        await _publisher.DidNotReceive().PublishStatusAsync(Arg.Any<ReaderStatus>());
+        await _publisher.Received(1).PublishStatusAsync(Arg.Is<ReaderStatus>(s =>
+            s.Connected &&
+            s.Antennas.SequenceEqual(new[] { new RfidGateway.Models.AntennaStatus((ushort)1, true, 23.5, -70.0) })));
     }
 
     // --- OnTagsReported (via callback capturado do SubscribeToEvents) ---
@@ -433,16 +439,53 @@ public class RfidReaderWorkerTests
             s.Antennas[0].Sensitivity == -70.0));
     }
 
+    [Fact]
+    public async Task PublishStatus_WhenBackendReturnsDesiredAntennas_AppliesAndConfirmsConfiguration()
+    {
+        var current = new RfidGateway.Models.AntennaStatus((ushort)1, true, 20, -60);
+        var desired = new RfidGateway.Models.AntennaStatus((ushort)1, true, 30, -70);
+        _readerService.GetAntennaStatus()
+            .Returns([current], [desired]);
+        _publisher.PublishStatusAsync(Arg.Any<ReaderStatus>())
+            .Returns(Task.FromResult<IReadOnlyList<RfidGateway.Models.AntennaStatus>>([desired]));
+
+        await _worker.StartAsync(CancellationToken.None);
+
+        _readerService.Received(1)
+            .ApplyAntennaConfiguration(Arg.Is<IReadOnlyList<RfidGateway.Models.AntennaStatus>>(items =>
+                items.Count == 1 &&
+                items[0].Port == 1 &&
+                items[0].Power == 30 &&
+                items[0].Sensitivity == -70));
+        await _publisher.Received(1)
+            .ConfirmConfigurationAsync(Arg.Is<ReaderStatus>(s =>
+                s.Antennas.Count == 1 &&
+                s.Antennas[0].Power == 30 &&
+                s.Antennas[0].Sensitivity == -70));
+    }
+
     // --- Helpers ---
 
     private RfidReaderWorker CreateWorker(Dictionary<string, string?> configValues) =>
-        new RfidReaderWorker(
+        CreateConfiguredWorker(configValues);
+
+    private RfidReaderWorker CreateConfiguredWorker(Dictionary<string, string?> configValues)
+    {
+        var readerService = Substitute.For<IReaderService>();
+        var publisher = _publisher;
+        publisher.PublishStatusAsync(Arg.Any<ReaderStatus>())
+            .Returns(Task.FromResult<IReadOnlyList<RfidGateway.Models.AntennaStatus>>([]));
+        publisher.ConfirmConfigurationAsync(Arg.Any<ReaderStatus>())
+            .Returns(Task.CompletedTask);
+
+        return new RfidReaderWorker(
             BuildConfig(configValues),
             Substitute.For<ILogger<RfidReaderWorker>>(),
-            Substitute.For<IReaderService>(),
+            readerService,
             new ReaderStatusService(),
-            _publisher,
+            publisher,
             Substitute.For<IHostApplicationLifetime>());
+    }
 
     private static IConfiguration BuildConfig(Dictionary<string, string?> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();

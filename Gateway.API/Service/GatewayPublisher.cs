@@ -1,5 +1,6 @@
 using RfidGateway.Models;
 using System.Diagnostics.CodeAnalysis;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 
@@ -41,15 +42,17 @@ public sealed class GatewayPublisher : IGatewayPublisher
             var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
             var json = JsonSerializer.Serialize(accessEvent, opts);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+            var url = BuildUrl(domain, endpoint);
+            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
 
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Publishing tag to {Domain} returned {Status}", domain, resp.StatusCode);
+                LogNotFoundUrl(resp.StatusCode, url);
+                _logger.LogWarning("Publishing tag to {Url} returned {Status}", url, resp.StatusCode);
                 return;
             }
 
-            _logger.LogDebug("Published tag to {Domain}", domain);
+            _logger.LogDebug("Published tag to {Url}", url);
 
             var gpoPort = _configuration.GetValue<ushort>("Reader:GpoPort", 1);
             var gpoDuration = _configuration.GetValue("Reader:GpoDurationSeconds", 15);
@@ -77,15 +80,17 @@ public sealed class GatewayPublisher : IGatewayPublisher
             var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
             var json = JsonSerializer.Serialize(tag, opts);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+            var url = BuildUrl(domain, endpoint);
+            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
 
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Publishing tag for creation to {Domain} returned {Status}", domain, resp.StatusCode);
+                LogNotFoundUrl(resp.StatusCode, url);
+                _logger.LogWarning("Publishing tag for creation to {Url} returned {Status}", url, resp.StatusCode);
                 return;
             }
 
-            _logger.LogDebug("Published tag for creation to {Domain}", domain);
+            _logger.LogDebug("Published tag for creation to {Url}", url);
         }
         catch (Exception ex)
         {
@@ -93,7 +98,7 @@ public sealed class GatewayPublisher : IGatewayPublisher
         }
     }
 
-    public async Task PublishStatusAsync(ReaderStatus status)
+    public async Task<IReadOnlyList<AntennaStatus>> PublishStatusAsync(ReaderStatus status)
     {
         var domain = _configuration["Gateway:Domain"];
         var endpoint = _configuration["Gateway:StatusEndpoint"] ?? "api/status";
@@ -101,6 +106,58 @@ public sealed class GatewayPublisher : IGatewayPublisher
         if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
         {
             _logger.LogDebug("Gateway:Domain or Gateway:StatusEndpoint not configured; skipping status publish.");
+            return [];
+        }
+
+        try
+        {
+            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var json = JsonSerializer.Serialize(status, opts);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var url = BuildUrl(domain, endpoint);
+            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                LogNotFoundUrl(resp.StatusCode, url);
+                _logger.LogWarning("Publishing status to {Url} returned {Status}", url, resp.StatusCode);
+            }
+            else
+            {
+                _logger.LogDebug("Published status to {Url}", url);
+                var responseJson = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                _logger.LogInformation("Backend status response: {Response}", responseJson);
+                var response = JsonSerializer.Deserialize<GatewayStatusResponse>(responseJson, opts);
+                var desiredAntennas = response?.DesiredAntennas ?? [];
+
+                foreach (var antenna in desiredAntennas)
+                {
+                    _logger.LogInformation(
+                        "Backend requested antenna {Port}: connected={Connected}, power={Power} dBm, sensitivity={Sensitivity} dBm.",
+                        antenna.Port,
+                        antenna.Connected,
+                        antenna.Power,
+                        antenna.Sensitivity);
+                }
+
+                return desiredAntennas;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish status to {Domain}", domain);
+        }
+
+        return [];
+    }
+
+    public async Task ConfirmConfigurationAsync(ReaderStatus status)
+    {
+        var domain = _configuration["Gateway:Domain"];
+        var endpoint = _configuration["Gateway:AntennaConfigurationEndpoint"] ?? "api/gateway/configuration";
+
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(endpoint))
+        {
+            _logger.LogDebug("Gateway:Domain or Gateway:AntennaConfigurationEndpoint not configured; skipping configuration confirmation.");
             return;
         }
 
@@ -109,16 +166,31 @@ public sealed class GatewayPublisher : IGatewayPublisher
             var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
             var json = JsonSerializer.Serialize(status, opts);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _httpClient.PostAsync($"{domain}/{endpoint}", content).ConfigureAwait(false);
+            var url = BuildUrl(domain, endpoint);
+            var resp = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
+
             if (!resp.IsSuccessStatusCode)
-                _logger.LogWarning("Publishing status to {Domain} returned {Status}", domain, resp.StatusCode);
-            else
-                _logger.LogDebug("Published status to {Domain}", domain);
+            {
+                LogNotFoundUrl(resp.StatusCode, url);
+                _logger.LogWarning("Confirming antenna configuration to {Url} returned {Status}", url, resp.StatusCode);
+                return;
+            }
+
+            _logger.LogDebug("Confirmed antenna configuration to {Url}", url);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to publish status to {Domain}", domain);
+            _logger.LogError(ex, "Failed to confirm antenna configuration.");
         }
+    }
+
+    private static string BuildUrl(string domain, string endpoint) =>
+        $"{domain.TrimEnd('/')}/{endpoint.TrimStart('/')}";
+
+    private void LogNotFoundUrl(System.Net.HttpStatusCode statusCode, string url)
+    {
+        if (statusCode == System.Net.HttpStatusCode.NotFound)
+            _logger.LogWarning("Gateway request returned 404 NotFound. Request URL: {Url}", url);
     }
 
     private async Task ActivateGpoAsync(ushort portNumber, int durationSeconds)
@@ -139,4 +211,6 @@ public sealed class GatewayPublisher : IGatewayPublisher
             try { _reader.SetGpo(portNumber, false); } catch { }
         }
     }
+
+    private sealed record GatewayStatusResponse(IReadOnlyList<AntennaStatus> DesiredAntennas);
 }
